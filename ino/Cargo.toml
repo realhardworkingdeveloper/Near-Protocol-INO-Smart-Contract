@@ -1,5 +1,5 @@
 [package]
-name = "non-fungible-token"
+name = "ino"
 version = "1.1.0"
 authors = ["David Tanaka <realhardworkingdeveloper@gmail.com>"]
 edition = "2021"
@@ -9,5 +9,3 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 near-sdk = "3.1.0"
-rand = "0.7.3"
-near-contract-standards = "3.1.1"

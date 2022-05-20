@@ -1262,6 +1262,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ino"
+version = "1.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1828,6 +1835,7 @@ dependencies = [
 name = "non-fungible-token-wrapper"
 version = "0.0.2"
 dependencies = [
+ "ino",
  "near-contract-standards",
  "near-sdk",
  "near-sdk-sim",
