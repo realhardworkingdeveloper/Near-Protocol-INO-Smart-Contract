@@ -9,14 +9,16 @@ use near_contract_standards::non_fungible_token::metadata::{
 use near_contract_standards::non_fungible_token::{Token, TokenId};
 use near_contract_standards::non_fungible_token::NonFungibleToken;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{UnorderedMap, LazyOption};
+use near_sdk::collections::{UnorderedMap, LazyOption, UnorderedSet};
 use near_sdk::json_types::*;
 use near_sdk::{
-    env, near_bindgen, AccountId, Balance, BorshStorageKey, PanicOnDefault, Promise, PromiseOrValue,
+    env, near_bindgen, AccountId, Balance, BorshStorageKey, PanicOnDefault, Promise, PromiseOrValue, CryptoHash,
 };
 use near_sdk::serde::{Deserialize, Serialize};
 
 near_sdk::setup_alloc!();
+
+const MULTIPLYER:Balance = 10_000_000_000_000_000;
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
@@ -36,29 +38,12 @@ enum StorageKey {
     TokenMetadata,
     Enumeration,
     Approval,
+    TokensPerOwner { account_hash: Vec<u8> },
+    TokenPerOwnerInner { account_id_hash: CryptoHash },
 }
 
 #[near_bindgen]
 impl Contract {
-    /// Initializes the contract owned by `owner_id` with
-    /// default metadata (for example purposes only).
-    // #[init]
-    // pub fn new_default_meta(owner_id: ValidAccountId) -> Self {
-    //     Self::new(
-    //         owner_id,
-    //         NFTContractMetadata {
-    //             spec: NFT_METADATA_SPEC.to_string(),
-    //             name: "Example NEAR non-fungible token".to_string(),
-    //             symbol: "EXAMPLE".to_string(),
-    //             icon: Some(DATA_IMAGE_SVG_NEAR_ICON.to_string()),
-    //             base_uri: Some("https://gateway.pinata.cloud/ipfs/QmeRGXZH4drhsGYiZmQS5nQbBxMmuugYiC2HBns3ChpMCC".to_string()),
-    //             reference: None,
-    //             reference_hash: None,
-    //         },
-    //         6:U128,
-    //         1_000_000_000_000_000_000_000_000
-    //     )
-    // }
 
     #[init]
     pub fn new(owner_id: ValidAccountId, metadata: NFTContractMetadata, price: Balance, count: u128) -> Self {
@@ -88,7 +73,7 @@ impl Contract {
         receiver_id: ValidAccountId,
     ) -> Token {
 
-        if env::attached_deposit() < self.mint_price * 10_000_000_000_000_000 {
+        if env::attached_deposit() < self.mint_price * MULTIPLYER {
             env::panic(b"Shoule be deposit mint price");
         }
 
@@ -105,7 +90,7 @@ impl Contract {
         let random_id: u128 = rng.gen_range(0, remain_count) + 1;
         let mut passed_id: u128 = 0;
 
-        for idx in 0..remain_count {
+        for idx in 0..self.total_count {
             match self.is_minted_by_id.get(&idx) {
                 None => {
                     passed_id += 1;
@@ -129,7 +114,7 @@ impl Contract {
             Some(data) => data,
         };
 
-        self.tokens.mint(
+        self.tokens.custom_mint(
             token_id.to_string(), 
             // ValidAccountId::try_from(env::predecessor_account_id()).unwrap(), 
             receiver_id,
@@ -148,8 +133,13 @@ impl Contract {
                     reference: Some(format!("{}/{}.json", base_uri, token_id.to_string())), 
                     reference_hash: None
                 }
-            )
+            ),
+            self.mint_price * MULTIPLYER
         )
+    }
+
+    pub fn get_minted(&self) -> u128 {
+        self.minted_count
     }
 }
 
@@ -161,5 +151,88 @@ near_contract_standards::impl_non_fungible_token_enumeration!(Contract, tokens);
 impl NonFungibleTokenMetadataProvider for Contract {
     fn nft_metadata(&self) -> NFTContractMetadata {
         self.metadata.get().unwrap()
+    }
+}
+
+pub trait Custom_NonFungibleTokenCore {
+    fn custom_mint(
+        &mut self, 
+        token_id: TokenId, 
+        token_owner_id: ValidAccountId, 
+        token_metadata: Option<TokenMetadata>,
+        price: Balance,
+    ) -> Token;
+}
+
+impl Custom_NonFungibleTokenCore for NonFungibleToken {
+    fn custom_mint(
+        &mut self,
+        token_id: TokenId,
+        token_owner_id: ValidAccountId,
+        token_metadata: Option<TokenMetadata>,
+        price: Balance,
+    ) -> Token {
+        let initial_storage_usage = env::storage_usage();
+        
+        if self.token_metadata_by_id.is_some() && token_metadata.is_none() {
+            env::panic(b"Must provide metadata");
+        }
+        if self.owner_by_id.get(&token_id).is_some() {
+            env::panic(b"token_id must be unique");
+        }
+
+        let owner_id: AccountId = token_owner_id.into();
+
+        // Core behavior: every token must have an owner
+        self.owner_by_id.insert(&token_id, &owner_id);
+
+        // Metadata extension: Save metadata, keep variable around to return later.
+        // Note that check above already panicked if metadata extension in use but no metadata
+        // provided to call.
+        self.token_metadata_by_id
+            .as_mut()
+            .and_then(|by_id| by_id.insert(&token_id, &token_metadata.as_ref().unwrap()));
+
+        // Enumeration extension: Record tokens_per_owner for use with enumeration view methods.
+        if let Some(tokens_per_owner) = &mut self.tokens_per_owner {
+            let mut token_ids = tokens_per_owner.get(&owner_id).unwrap_or_else(|| {
+                UnorderedSet::new(StorageKey::TokensPerOwner {
+                    account_hash: env::sha256(owner_id.as_bytes()),
+                })
+            });
+            token_ids.insert(&token_id);
+            tokens_per_owner.insert(&owner_id, &token_ids);
+        }
+
+        // Approval Management extension: return empty HashMap as part of Token
+        let approved_account_ids =
+            if self.approvals_by_id.is_some() { Some(HashMap::new()) } else { None };
+
+        // Return any extra attached deposit not used for storage
+        refund_deposit(env::storage_usage() - initial_storage_usage, price);
+
+        Token { token_id, owner_id, metadata: token_metadata, approved_account_ids }
+    }
+}
+
+pub(crate) fn refund_deposit(storage_used: u64, price: Balance) {
+    //get how much it would cost to store the information
+    let required_cost = env::storage_byte_cost() * Balance::from(storage_used) + price;
+    //get the attached deposit
+    let attached_deposit = env::attached_deposit();
+
+    //make sure that the attached deposit is greater than or equal to the required cost
+    assert!(
+        required_cost <= attached_deposit,
+        "Must attach {} yoctoNEAR to cover storage",
+        required_cost,
+    );
+
+    //get the refund amount from the attached deposit - required cost
+    let refund = attached_deposit - required_cost;
+
+    //if the refund is greater than 1 yocto NEAR, we refund the predecessor that amount
+    if refund > 1 {
+        Promise::new(env::predecessor_account_id()).transfer(refund);
     }
 }
